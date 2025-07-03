@@ -1,0 +1,21 @@
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
+~$*
+
+# Backup files
+*.bak
+*.swp
+*.swo
+*.old
+*.mp4
