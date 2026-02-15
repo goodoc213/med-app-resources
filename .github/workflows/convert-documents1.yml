@@ -1,0 +1,155 @@
+name: Convert Documents
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install LibreOffice
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice libreoffice-impress imagemagick
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install Python dependencies
+        run: |
+          pip install Pillow
+      
+      - name: Create conversion script
+        run: |
+          cat > convert.py << 'EOF'
+          import os
+          import subprocess
+          from pathlib import Path
+          from PIL import Image
+
+          converted_any = False
+
+          def convert_docx_to_pdf(file_path):
+              global converted_any
+              output_dir = Path("converted/pdfs")
+              if file_path.parent != Path("Courses"):
+                  rel_path = file_path.parent.relative_to("Courses")
+                  output_dir = output_dir / rel_path
+              output_dir.mkdir(parents=True, exist_ok=True)
+              
+              try:
+                  subprocess.run([
+                      'libreoffice', '--headless', '--convert-to', 'pdf',
+                      '--outdir', str(output_dir), str(file_path)
+                  ], timeout=120, check=True)
+                  print(f"✓ Converted {file_path.name} → PDF")
+                  converted_any = True
+              except Exception as e:
+                  print(f"✗ Failed to convert {file_path.name}: {e}")
+
+          def convert_pptx_to_images(file_path):
+              global converted_any
+              pres_name = file_path.stem
+              output_dir = Path("converted/presentations")
+              if file_path.parent != Path("Courses"):
+                  rel_path = file_path.parent.relative_to("Courses")
+                  output_dir = output_dir / rel_path
+              output_dir = output_dir / pres_name
+              output_dir.mkdir(parents=True, exist_ok=True)
+              
+              try:
+                  # PPTX → PDF
+                  temp_pdf = output_dir / "temp.pdf"
+                  subprocess.run([
+                      'libreoffice', '--headless', '--convert-to', 'pdf',
+                      '--outdir', str(output_dir), str(file_path)
+                  ], timeout=120, check=True)
+                  
+                  generated_pdf = output_dir / f"{pres_name}.pdf"
+                  if generated_pdf.exists():
+                      generated_pdf.rename(temp_pdf)
+                  
+                  # PDF → Images
+                  subprocess.run([
+                      'convert', '-density', '300', '-quality', '95',
+                      str(temp_pdf), str(output_dir / 'slide-%03d.jpg')
+                  ], timeout=300, check=True)
+                  
+                  # Optimize images
+                  for img in output_dir.glob('slide-*.jpg'):
+                      image = Image.open(img)
+                      if image.width > 1920:
+                          ratio = 1920 / image.width
+                          new_height = int(image.height * ratio)
+                          image = image.resize((1920, new_height), Image.Resampling.LANCZOS)
+                      image.save(img, 'JPEG', quality=90, optimize=True)
+                  
+                  temp_pdf.unlink()
+                  slide_count = len(list(output_dir.glob('slide-*.jpg')))
+                  print(f"✓ Converted {file_path.name} → {slide_count} slides")
+                  converted_any = True
+              except Exception as e:
+                  print(f"✗ Failed to convert {file_path.name}: {e}")
+
+          # Find and convert files
+          courses_dir = Path("Courses")
+          if not courses_dir.exists():
+              print("⚠️  No 'Courses' directory found!")
+              print("   Create a 'Courses/' folder and add your files there.")
+              exit(0)
+
+          docx_files = list(courses_dir.rglob("*.docx")) + list(courses_dir.rglob("*.doc"))
+          pptx_files = list(courses_dir.rglob("*.pptx")) + list(courses_dir.rglob("*.ppt"))
+          
+          if not docx_files and not pptx_files:
+              print("⚠️  No documents found to convert!")
+              print("   Add .docx or .pptx files to the Courses/ folder.")
+              exit(0)
+          
+          print(f"📁 Found {len(docx_files)} Word document(s)")
+          print(f"📁 Found {len(pptx_files)} PowerPoint presentation(s)")
+          print()
+          
+          for docx in docx_files:
+              convert_docx_to_pdf(docx)
+          
+          for pptx in pptx_files:
+              convert_pptx_to_images(pptx)
+          
+          if not converted_any:
+              print("⚠️  No files were successfully converted.")
+              exit(0)
+          
+          print()
+          print("✅ Conversion complete!")
+          EOF
+      
+      - name: Run conversion
+        run: python convert.py
+      
+      - name: Check if files were converted
+        id: check_files
+        run: |
+          if [ -d "converted" ] && [ "$(ls -A converted)" ]; then
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            echo "✅ Files were converted successfully"
+          else
+            echo "has_files=false" >> $GITHUB_OUTPUT
+            echo "⚠️  No files to commit"
+          fi
+      
+      - name: Commit converted files
+        if: steps.check_files.outputs.has_files == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add converted/
+          git commit -m "🔄 Auto-converted documents [skip ci]" || echo "No changes to commit"
+          git push
